@@ -1,0 +1,87 @@
+---
+networks:
+  isolated:
+    internal: true
+  public:
+
+services:
+  nginx:
+    container_name: nginx
+    image: registry.poppet.io/dockerhub/nginx:1.27.0-alpine
+    ports:
+      - 80:80
+      - 9119:9119
+    restart: always
+    volumes:
+      - ./config/nginx:/etc/nginx/conf.d
+    networks:
+      - public
+      - isolated
+    links:
+      - openwebui
+      - hermes
+
+  openwebui:
+    container_name: openwebui
+    image: registry.poppet.io/ghcr/open-webui/open-webui:v0.9.5
+    volumes:
+      - ./data/open-webui:/app/backend/data
+    ports:
+      - 3000:8080
+    environment:
+      OLLAMA_BASE_URL: "http://ollama:11434"
+      OPENAI_API_BASE_URL: "http://hermes:8642/v1"
+      OPENAI_API_KEY: "52d8b87d59b7a6b35a2dd25ccc4c2b0fcb6c0b8e"
+    restart: unless-stopped
+    networks:
+      - isolated
+    depends_on:
+      - ollama
+
+  hermes:
+    container_name: hermes
+    image: registry.poppet.io/dockerhub/nousresearch/hermes-agent:v2026.5.7
+    volumes:
+      - ./data/hermes-agent:/opt/data
+    ports:
+      - 8642:8642 # Agent
+      - 9119:9119 # Dashboad
+    environment:
+      API_SERVER_ENABLED: "true"
+      API_SERVER_HOST: 0.0.0.0
+      API_SERVER_KEY: "52d8b87d59b7a6b35a2dd25ccc4c2b0fcb6c0b8e"
+      API_SERVER_CORS_ORIGINS: "*"
+      HERMES_DASHBOARD: 1
+      HONCHO_API_KEY: "hermes"
+#      TERMINAL_SSH_HOST: slop.poppet.io
+#      TERMINAL_SSH_USER: hermes
+    restart: unless-stopped
+    networks:
+      - isolated
+    command: gateway run
+    shm_size: "4g"
+
+
+  ollama:
+    container_name: ollama
+    image: registry.poppet.io/dockerhub/ollama/ollama:0.22.1-rocm
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - video
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./data/ollama:/root/.ollama
+    environment:
+      OLLAMA_CONTEXT_LENGTH: 262144
+      OLLAMA_FLASH_ATTENTION: 1
+      OLLAMA_KEEP_ALIVE: 24h
+      OLLAMA_KV_CACHE_TYPE: q8_0
+      OLLAMA_NO_CLOUD: 1
+      OLLAMA_MAX_LOADED_MODELS: 2
+    restart: unless-stopped
+    networks:
+     - isolated
+     - public

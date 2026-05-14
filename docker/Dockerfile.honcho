@@ -1,0 +1,6 @@
+FROM registry.poppet.io/ghcr/plastic-labs/honcho:v3.0.5
+
+# TODO: Don't patch, just add to image if possible
+#       https://github.com/openai/tiktoken/blob/main/tiktoken/model.py
+
+COPY docker/honcho/tokens.py src/utils/tokens.py
