@@ -1,0 +1,230 @@
+---
+networks:
+  isolated:
+    internal: true
+  public:
+
+services:
+  proxy:
+    image: registry.poppet.io/dockerhub/ubuntu/squid:latest
+    container_name: proxy
+    ports:
+      - 3128:3128
+    volumes:
+      - ./config/squid/squid.conf:/etc/squid/squid.conf:ro
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    restart: unless-stopped
+    networks:
+      - public
+      - isolated
+
+  nginx:
+    container_name: nginx
+    image: registry.poppet.io/dockerhub/nginx:1.27.0-alpine
+    ports:
+      - 80:80
+      - 443:443
+    restart: always
+    volumes:
+      - ./config/nginx:/etc/nginx/conf.d
+      - /etc/letsencrypt/live/ai.poppet.io-0001:/etc/letsencrypt/live/ai.poppet.io-0001
+      - /etc/letsencrypt/archive/ai.poppet.io-0001:/etc/letsencrypt/archive/ai.poppet.io-0001
+      - /etc/letsencrypt/options-ssl-nginx.conf:/etc/letsencrypt/options-ssl-nginx.conf
+      - /etc/letsencrypt/ssl-dhparams.pem:/etc/letsencrypt/ssl-dhparams.pem
+    networks:
+      - public
+      - isolated
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    depends_on:
+      - openwebui
+      - lemonade
+
+  openwebui:
+    container_name: openwebui
+    image: registry.poppet.io/ghcr/open-webui/open-webui:v0.12.3-slim
+    volumes:
+      - ./data/open-webui:/app/backend/data
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    ports:
+      - 3000:8080
+    depends_on:
+      - proxy
+      - lemonade
+      - postgres
+      - tika
+      - valkey
+    environment:
+      HTTP_PROXY: "http://proxy:3128"
+      HTTPS_PROXY: "http://proxy:3128"
+      OLLAMA_BASE_URL: "https://openai.ai.poppet.io"
+      OPENAI_API_BASE_URL: "https://openai.ai.poppet.io/v1"
+      OPENAI_API_KEY: "52d8b87d59b7a6b35a2dd25ccc4c2b0fcb6c0b8e"
+      WEBUI_SECRET_KEY: "52d8b87d59b7a6b35a2dd25ccc4c2b0fcb6c0b8e"
+      # DB
+      DATABASE_URL: "postgresql://owui_main:password@postgres:5432/owui_main"
+      VECTOR_DB: "pgvector"
+      PGVECTOR_DB_URL: "postgresql://owui_vector:password@postgres:5432/owui_vector"
+      # Redis
+      REDIS_URL: "redis://valkey:6379/1"
+      WEBSOCKET_MANAGER: "redis"
+      ENABLE_WEBSOCKET_SUPPORT: "true"
+      # RAG
+      RAG_OLLAMA_API_KEY: "ollama"
+      RAG_OLLAMA_BASE_URL: "https://openai.ai.poppet.io/v1"
+      RAG_EMBEDDING_ENGINE: "openai"
+      RAG_EMBEDDING_MODEL: "nomic-embed-text-v1-GGUF-F16"
+      # Tika
+      CONTENT_EXTRACTION_ENGINE: "tika"
+      TIKA_SERVER_URL: "http://tika:9998"
+    restart: unless-stopped
+    networks:
+      - public
+      - isolated
+
+  tika:
+    container_name: tika
+    image: registry.poppet.io/dockerhub/apache/tika:3.3.0.0-full
+    ports:
+      - 9998:9998
+    depends_on:
+      - proxy
+    restart: unless-stopped
+    networks:
+      - isolated
+
+  lemonade:
+    image: registry.poppet.io/ghcr/lemonade-sdk/lemonade-server:v2026.43.3
+    container_name: lemonade
+    ports:
+      - "11434:13305"
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - video
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      - ./data/lemonade/cache:/opt/lemonade/.cache/huggingface
+      - ./data/lemonade/llama:/opt/lemonade/llama
+      - ./data/lemonade/data:/opt/lemonade/.cache/lemonade
+      - ./data/lemonade/config:/opt/lemonade/.config/lemonade
+    restart: unless-stopped
+    networks:
+      - isolated
+      - public
+
+  playwright:
+    container_name: playwright
+    image: mcr.microsoft.com/playwright/mcp:latest
+    command: /app/cli.js --headless --browser chromium --no-sandbox --port 8931 --host 0.0.0.0
+    entrypoint: node
+    restart: unless-stopped
+    ports:
+      - "8931:8931"
+    networks:
+      - public
+
+  sonarqube:
+    image: registry.poppet.io/dockerhub/library/sonarqube:community
+    hostname: sonarqube
+    container_name: sonarqube
+    read_only: true
+    ports:
+      - "9000:9000"
+    depends_on:
+      - postgres
+    environment:
+      SONAR_JDBC_URL: jdbc:postgresql://postgres:5432/sonarqube
+      SONAR_JDBC_USERNAME: sonarqube
+      SONAR_JDBC_PASSWORD: password
+      SONAR_MCP_ENABLED: "true"
+      SONAR_MCP_SERVERURL: "http://sonarqube-mcp:8001"
+      SONAR_MCP_HEALTHCHECKINTERVAL: "30"
+    volumes:
+      - ./data/sonarqube/data:/opt/sonarqube/data
+      - ./data/sonarqube/extensions:/opt/sonarqube/extensions
+      - ./data/sonarqube/logs:/opt/sonarqube/logs
+    tmpfs:
+      - /tmp:size=256M,mode=1777
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/api/system/status | grep -q '\"status\":\"UP\"'"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    networks:
+      - isolated
+      - public
+
+  sonarqube-mcp:
+    image: registry.poppet.io/dockerhub/sonarsource/sonarqube-mcp:1.22.0.3040
+    container_name: sonarqube-mcp
+    ports:
+      - "8001:8001"
+    depends_on:
+      - sonarqube
+    environment:
+      STORAGE_PATH: /data
+      SONARQUBE_URL: http://sonarqube:9000
+      SONARQUBE_HTTP_HOST: 0.0.0.0
+      SONARQUBE_HTTP_PORT: 8001
+      SONARQUBE_TRANSPORT: http
+      TELEMETRY_DISABLED: "true"
+      SONARQUBE_TOKEN: "sqp_94fbf6a59e9d805cee730dd6db46a18f4068fc92"
+    volumes:
+      - ./data/sonarqube-mcp:/data
+    networks:
+      - isolated
+      - public
+
+  jaeger:
+    container_name: jaeger
+    image: cr.jaegertracing.io/jaegertracing/jaeger:2.21.0
+    ports:
+      - "16686:16686"
+      - "4317:4317"
+      - "4318:4318"
+      - "5778:5778"
+      - "9411:9411"
+    networks:
+      - isolated
+      - public
+
+  postgres:
+    container_name: postgres
+    image: registry.poppet.io/dockerhub/pgvector/pgvector:pg18-trixie
+    restart: always
+    volumes:
+      - ./data/postgres:/var/lib/postgresql
+      - ./scripts/postgres:/docker-entrypoint-initdb.d
+    environment:
+      POSTGRES_USER: "postgres"
+      POSTGRES_PASSWORD: "password"
+      POSTGRES_HOST_AUTH_METHOD: "trust"
+    ports:
+      - "5432:5432"
+    networks:
+      - isolated
+
+  valkey:
+    container_name: valkey
+    image: registry.poppet.io/dockerhub/valkey/valkey:9-alpine
+    command: valkey-server --save 30 1 --loglevel warning
+    restart: always
+    volumes:
+      - ./data/valkey:/data/
+    networks:
+      - isolated
